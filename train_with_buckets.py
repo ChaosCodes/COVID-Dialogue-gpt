@@ -104,9 +104,6 @@ def train_model(
             mask_encoder_input = mask_encoder_input.squeeze(dim=0)[:,:max_en_len]
             mask_decoder_input = mask_decoder_input.squeeze(dim=0)[:,:max_de_len]
             #-------------- cut the padding --------------
-            print(max_en_len)
-            print(max_de_len)
-
 
             _, past = encoder(encoder_input, mask_encoder_input)
         
