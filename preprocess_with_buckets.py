@@ -5,18 +5,22 @@ import codecs
 
 tokenizer = BertTokenizer.from_pretrained("bert-base-chinese")
 
-dataset_file = os.path.join(os.path.abspath('..'), 'COVID-Dialogue-Dataset-Chinese.txt')
+dataset_file = os.path.join(os.path.abspath('.'), 'COVID-Dialogue-Dataset-Chinese.txt')
 
+MAX_ENCODER_SIZE = 400
+MAX_DECODER_SIZE = 100
 
-def seq2token_ids(source_seq, target_seq, encoder_max, decoder_max):
+def seq2token_ids(source_seq, target_seq):
     
     # 可以尝试对source_seq进行切分
     source_seq = tokenizer.tokenize(source_seq) + ["[SEP]"]
     target_seq = ["[CLS]"] + tokenizer.tokenize(target_seq)
 
-    # 设置不得超过encoder_max大小
-    encoder_input = ["[CLS]"] + source_seq[-(encoder_max-1):]
-    decoder_input = target_seq[:decoder_max-1] + ["[SEP]"]
+    # 设置不得超过 MAX_ENCODER_SIZE 大小
+    encoder_input = ["[CLS]"] + source_seq[-(MAX_ENCODER_SIZE - 1):]
+    decoder_input = target_seq[:MAX_DECODER_SIZE - 1] + ["[SEP]"]
+    enc_len = len(encoder_input)
+    dec_len = len(decoder_input)
     
     # conver to ids
     encoder_input = tokenizer.convert_tokens_to_ids(encoder_input)
@@ -27,10 +31,10 @@ def seq2token_ids(source_seq, target_seq, encoder_max, decoder_max):
     mask_decoder_input = [1] * len(decoder_input)
 
     # padding
-    encoder_input += [0] * (encoder_max - len(encoder_input))
-    decoder_input += [0] * (decoder_max - len(decoder_input))
-    mask_encoder_input += [0] * (encoder_max - len(mask_encoder_input))
-    mask_decoder_input += [0] * (decoder_max - len(mask_decoder_input))
+    encoder_input += [0] * (MAX_ENCODER_SIZE - len(encoder_input))
+    decoder_input += [0] * (MAX_DECODER_SIZE - len(decoder_input))
+    mask_encoder_input += [0] * (MAX_ENCODER_SIZE - len(mask_encoder_input))
+    mask_decoder_input += [0] * (MAX_DECODER_SIZE - len(mask_decoder_input))
 
     # turn into tensor
     encoder_input = torch.LongTensor(encoder_input)
@@ -38,45 +42,42 @@ def seq2token_ids(source_seq, target_seq, encoder_max, decoder_max):
     
     mask_encoder_input = torch.LongTensor(mask_encoder_input)
     mask_decoder_input = torch.LongTensor(mask_decoder_input)
+    
+    enc_len, dec_len = torch.LongTensor([enc_len]), torch.LongTensor([dec_len])
 
-    return encoder_input, decoder_input, mask_encoder_input, mask_decoder_input
+    return encoder_input, decoder_input, mask_encoder_input, mask_decoder_input, enc_len, dec_len
 
 
-def make_dataset(data, buckets, file_name='train_data.pth'):
-    train_data = [[] for _ in buckets]
+def make_dataset(data, file_name='train_data.pth'):
+    train_data = []
 
     for d in data:
-        bucket_id = len(buckets) - 1
-        for idx in range(len(buckets)):
-            source_len, target_len = buckets[idx]
-            if len(d[0]) <= source_len and len(d[1]) <= target_len:
-                bucket_id = idx
-                break
-
-        encoder_input, decoder_input, mask_encoder_input, mask_decoder_input = seq2token_ids(d[0],\
-                                                                                             d[1],\
-                                                                                             buckets[bucket_id][0] + 2,\
-                                                                                             buckets[bucket_id][1] + 2)
-        train_data[bucket_id].append((encoder_input, 
-                        decoder_input, 
-                        mask_encoder_input, 
-                        mask_decoder_input))
-
-    for idx in range(len(buckets)):
-        if len(train_data[idx]) == 0:
-            continue
-        encoder_input, \
-        decoder_input, \
-        mask_encoder_input, \
-        mask_decoder_input = zip(*train_data[idx])
-
-        encoder_input = torch.stack(encoder_input)
-        decoder_input = torch.stack(decoder_input)
-        mask_encoder_input = torch.stack(mask_encoder_input)
-        mask_decoder_input = torch.stack(mask_decoder_input)
+        encoder_input, decoder_input, mask_encoder_input, mask_decoder_input, enc_len, dec_len = seq2token_ids(d[0], d[1])
+        train_data.append((encoder_input, 
+                           decoder_input,
+                           mask_encoder_input,
+                           mask_decoder_input,
+                           enc_len,
+                           dec_len))
 
 
-        train_data[idx] = [encoder_input, decoder_input, mask_encoder_input, mask_decoder_input]
+    encoder_input, \
+    decoder_input, \
+    mask_encoder_input, \
+    mask_decoder_input, \
+    enc_len, \
+    dec_len = zip(*train_data)
+
+    encoder_input = torch.stack(encoder_input)
+    decoder_input = torch.stack(decoder_input)
+    mask_encoder_input = torch.stack(mask_encoder_input)
+    mask_decoder_input = torch.stack(mask_decoder_input)
+    enc_len = torch.stack(enc_len)
+    dec_len = torch.stack(dec_len)
+
+
+    train_data = [encoder_input, decoder_input, mask_encoder_input, mask_decoder_input, enc_len, dec_len]
+
     torch.save(train_data, file_name)
 
 def get_splited_data_by_file(dataset_file, decode):
@@ -146,33 +147,31 @@ def get_file_path_by_name(name):
                         'Medical-Dialogue-Dataset-Chinese',\
                         f'{name}.txt')
 
-# Set the buckets
-buckets = [(50, 20), (75, 25), (90, 40), (120, 50), (150, 60), (200, 70), (250, 80), (300, 90), (398, 90), (398, 100)]
 
+data = []
 
-data = [[], [], []]
+# # construct the file_config
+# filename = list(range(2010, 2021))
+# filename.remove(2017)
+# decoding = ['utf-8'] * 10
+# decoding[1] = 'GBK'
+# decoding[4] = 'GBK'
+# file_config = zip(filename, decoding)
 
-# construct the file_config
-filename = list(range(2010, 2021))
-filename.remove(2017)
-decoding = ['utf-8'] * 10
-decoding[1] = 'GBK'
-decoding[4] = 'GBK'
-file_config = zip(filename, decoding)
+# for name, decode in file_config:
+#     print(f'Process the {name} file')
+#     temp_data = get_splited_data_by_file(get_file_path_by_name(name), decode)
+#     data[0].extend(temp_data[0])
+#     data[1].extend(temp_data[1])
+#     data[2].extend(temp_data[2])
 
-for name, decode in file_config:
-    print(f'Process the {name} file')
-    temp_data = get_splited_data_by_file(get_file_path_by_name(name), decode)
-    data[0].extend(temp_data[0])
-    data[1].extend(temp_data[1])
-    data[2].extend(temp_data[2])
-
+data = get_splited_data_by_file(dataset_file, 'utf-8')
 
 print(f'Process the train dataset')
-make_dataset(data[0], buckets, 'train_data.pth')
+make_dataset(data[0], 'train_data.pth')
 
 print(f'Process the validate dataset')
-make_dataset(data[1], buckets, 'validate_data.pth')
+make_dataset(data[1], 'validate_data.pth')
 
 print(f'Process the test dataset')
-make_dataset(data[2], buckets, 'test_data.pth')
+make_dataset(data[2], 'test_data.pth')

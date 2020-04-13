@@ -17,11 +17,14 @@ from chinese_gpt import TransformerEncoder, TransformerDecoderLM
 # uses bert chinese wordpiece tokenization
 from pytorch_pretrained_bert import OpenAIAdam
 
+from bucket_sampler import BucketSampler
+
 
 def train_model(
     epochs=10,
     num_gradients_accumulation=4,
     batch_size=4,
+    bucket_size=500,
     gpu_id=0,
     lr=1e-5,
     load_dir='decoder_model'
@@ -45,22 +48,20 @@ def train_model(
 
 
     #------------------------LOAD TRAIN DATA------------------
-    # get the data by buckets dataset
     train_data = torch.load("train_data.pth")
-    train_datasets = [TensorDataset(*data) for data in train_data]
-    train_dataloaders = [DataLoader(dataset=dataset, shuffle=True, batch_size=batch_size) for dataset in train_datasets]
+    train_dataset = TensorDataset(*train_data)
+    train_bucket_sampler = BucketSampler(train_data[4], train_data[5], bucket_size, batch_size)
+    train_dataloader = DataLoader(dataset=train_dataset, sampler=train_bucket_sampler)
 
     val_data = torch.load("validate_data.pth")
-    val_datasets = [TensorDataset(*data) for data in val_data]
-    val_dataloaders = [DataLoader(dataset=dataset, shuffle=True, batch_size=batch_size) for dataset in val_datasets]
+    val_dataset = TensorDataset(*val_data)
+    val_bucket_sampler = BucketSampler(val_data[4], val_data[5], bucket_size // 10, batch_size)
+    val_dataloader = DataLoader(dataset=val_dataset, sampler=val_bucket_sampler)
     #------------------------END LOAD TRAIN DATA--------------
     
 
     #------------------------SET OPTIMIZER-------------------
-    train_dataset_num = 0
-    for train_dataset in train_datasets:
-        train_dataset_num += len(train_dataset)
-    num_train_optimization_steps = train_dataset_num * epochs // batch_size // num_gradients_accumulation
+    num_train_optimization_steps = len(train_data[0]) * epochs // batch_size // num_gradients_accumulation
 
     param_optimizer = list(decoder.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -88,36 +89,45 @@ def train_model(
         decoder.train()
         losses = 0
         times = 0
+        for batch in train_dataloader:
+            batch = [item.to(device) for item in batch]
 
-        bucket_id = 0
-        for train_dataloader in train_dataloaders:
-            print(f'Start training the {bucket_id} bucket...')
-            for batch in train_dataloader:
-                batch = [item.to(device) for item in batch]
+            encoder_input, decoder_input, mask_encoder_input, mask_decoder_input, en_len, de_len = batch
 
-                encoder_input, decoder_input, mask_encoder_input, mask_decoder_input = batch
+            #-------------- cut the padding --------------
+            max_en_len = torch.max(en_len)
+            max_de_len = torch.max(de_len)
 
-                _, past = encoder(encoder_input, mask_encoder_input)
+            encoder_input = encoder_input.squeeze(dim=0)[:,:max_en_len]
+            decoder_input = decoder_input.squeeze(dim=0)[:,:max_de_len]
+
+            mask_encoder_input = mask_encoder_input.squeeze(dim=0)[:,:max_en_len]
+            mask_decoder_input = mask_decoder_input.squeeze(dim=0)[:,:max_de_len]
+            #-------------- cut the padding --------------
+            print(max_en_len)
+            print(max_de_len)
+
+
+            _, past = encoder(encoder_input, mask_encoder_input)
+        
+            mask = torch.cat([mask_encoder_input, mask_decoder_input], dim=1)
+            logits, _ = decoder(decoder_input, mask, past=past, past_length=0)
             
-                mask = torch.cat([mask_encoder_input, mask_decoder_input], dim=1)
-                logits, _ = decoder(decoder_input, mask, past=past, past_length=0)
-                
-                out = logits[:, :-1].contiguous()
-                target = decoder_input[:, 1:].contiguous()
-                target_mask = mask_decoder_input[:, 1:].contiguous()
+            out = logits[:, :-1].contiguous()
+            target = decoder_input[:, 1:].contiguous()
+            target_mask = mask_decoder_input[:, 1:].contiguous()
 
-                loss = util.sequence_cross_entropy_with_logits(out, target, target_mask, average="token")
-                loss.backward()
+            loss = util.sequence_cross_entropy_with_logits(out, target, target_mask, average="token")
+            loss.backward()
 
-                losses += loss.item()
-                times += 1
-                
-                update_count += 1
+            losses += loss.item()
+            times += 1
+            
+            update_count += 1
 
-                if update_count % num_gradients_accumulation == num_gradients_accumulation - 1:
-                    optimizer.step()
-                    optimizer.zero_grad()
-            bucket_id += 1
+            if update_count % num_gradients_accumulation == num_gradients_accumulation - 1:
+                optimizer.step()
+                optimizer.zero_grad()
         end = time.time()
         print('-'*20 + f'epoch {epoch}' + '-'*20)
         print(f'time: {(end - start)}')
@@ -132,27 +142,33 @@ def train_model(
         print('start calculate the perplexity....')
 
         with torch.no_grad():
-            bucket_id = 0
-            for val_dataloader in val_dataloaders:
-                print(f'Start training the {bucket_id} bucket...')
-                bucket_id += 1
-                for batch in val_dataloader:
-                    batch = [item.to(device) for item in batch]
+            for batch in val_dataloader:
+                batch = [item.to(device) for item in batch]
 
-                    encoder_input, decoder_input, mask_encoder_input, mask_decoder_input = batch
+                encoder_input, decoder_input, mask_encoder_input, mask_decoder_input, en_len, de_len = batch
+                #-------------- cut the padding --------------
+                max_en_len = torch.max(en_len)
+                max_de_len = torch.max(de_len)
 
-                    _, past = encoder(encoder_input, mask_encoder_input)
+                encoder_input = encoder_input.squeeze(dim=0)[:,:max_en_len]
+                decoder_input = decoder_input.squeeze(dim=0)[:,:max_de_len]
+
+                mask_encoder_input = mask_encoder_input.squeeze(dim=0)[:,:max_en_len]
+                mask_decoder_input = mask_decoder_input.squeeze(dim=0)[:,:max_de_len]
+                #-------------- cut the padding --------------
+    
+                _, past = encoder(encoder_input, mask_encoder_input)
+            
+                mask = torch.cat([mask_encoder_input, mask_decoder_input], dim=1)
+                logits, _ = decoder(decoder_input, mask, past=past, past_length=0)
                 
-                    mask = torch.cat([mask_encoder_input, mask_decoder_input], dim=1)
-                    logits, _ = decoder(decoder_input, mask, past=past, past_length=0)
-                    
-                    out = logits[:, :-1].contiguous()
-                    target = decoder_input[:, 1:].contiguous()
-                    target_mask = mask_decoder_input[:, 1:].contiguous()
+                out = logits[:, :-1].contiguous()
+                target = decoder_input[:, 1:].contiguous()
+                target_mask = mask_decoder_input[:, 1:].contiguous()
 
-                    loss = util.sequence_cross_entropy_with_logits(out, target, target_mask, average="token")
-                    perplexity += np.exp(loss.item())
-                    batch_count += 1
+                loss = util.sequence_cross_entropy_with_logits(out, target, target_mask, average="token")
+                perplexity += np.exp(loss.item())
+                batch_count += 1
 
         print(f'validate perplexity: {perplexity / batch_count}')
 
